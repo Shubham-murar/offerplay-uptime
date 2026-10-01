@@ -88,9 +88,8 @@ jobs:
             DETAIL=$'\n'"- this is a test alert; the API is fine"
           fi
           TITLE="${TEST}OfferPlay API is DOWN - EMERGENCY"
-          MSG="$(date -u '+%d %b %H:%M UTC') - the API is failing for external clients:${DETAIL}
-
-What to do: Cloudways -> Server -> Security -> Firewall -> (gear) -> turn anti-bot / Splash Screen OFF, or ask Cloudways support to whitelist api.offerplay.in in WebShield. Then confirm https://api.offerplay.in/api/app/feature-flags returns JSON."
+          MSG="$(date -u '+%d %b %H:%M UTC') - the API is failing for external clients:${DETAIL}"
+          MSG="${MSG}"$'\n\n'"What to do: Cloudways -> Server -> Security -> Firewall -> (gear) -> turn anti-bot / Splash Screen OFF, or ask Cloudways support to whitelist api.offerplay.in in WebShield. Then confirm https://api.offerplay.in/api/app/feature-flags returns JSON."
           if [[ -n "$NTFY_TOPIC" ]]; then
             curl -sS -o /dev/null -w "ntfy push: HTTP %{http_code}\n" \
               -H "Title: $TITLE" -H "Priority: 5" -H "Tags: rotating_light,sos" \
@@ -103,8 +102,7 @@ What to do: Cloudways -> Server -> Security -> Firewall -> (gear) -> turn anti-b
             for id in ${TELEGRAM_CHAT_IDS//,/ }; do
               curl -sS -o /dev/null -w "telegram($id): HTTP %{http_code}\n" \
                 "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-                --data-urlencode "chat_id=$id" --data-urlencode "text=$TITLE
-$MSG"
+                --data-urlencode "chat_id=$id" --data-urlencode "text=${TITLE}"$'\n'"${MSG}"
             done
           fi
 
