@@ -68,31 +68,41 @@ jobs:
             echo "down=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Look up previous run (for recovery notice)
+      - name: Was the API really down on the previous run? (for recovery notice)
         id: prev
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          prev=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow api-watch.yml --status completed --limit 1 --json conclusion -q '.[0].conclusion' 2>/dev/null || echo unknown)
-          echo "conclusion=${prev:-unknown}" >> "$GITHUB_OUTPUT"
+          # Only a run whose "Mark the run red" step failed counts as a REAL outage.
+          # A workflow-file error or a test run must never trigger a "recovered" notice.
+          prev_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow api-watch.yml --status completed --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+          was_down=false
+          if [[ -n "$prev_id" ]]; then
+            n=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$prev_id/jobs" \
+                 -q '[.jobs[].steps[] | select(.name=="Mark the run red while the API is down" and .conclusion=="failure")] | length' 2>/dev/null || echo 0)
+            [[ "${n:-0}" -gt 0 ]] && was_down=true
+          fi
+          echo "was_down=$was_down" >> "$GITHUB_OUTPUT"
 
       - name: Alert founders (ntfy + Telegram)
         if: steps.probe.outputs.down == 'true' || github.event.inputs.test_alert == 'true'
         shell: bash
         run: |
-          TEST=""; [[ "${{ github.event.inputs.test_alert }}" == "true" ]] && TEST="[TEST] "
+          IST_NOW="$(TZ=Asia/Kolkata date '+%d %b %Y, %I:%M %p IST')"
+          FIX="What to do: Cloudways -> Server -> Security -> Firewall -> (gear) -> turn anti-bot / Splash Screen OFF, or ask Cloudways support to whitelist api.offerplay.in in WebShield. Then confirm https://api.offerplay.in/api/app/feature-flags returns JSON."
           if [[ "${{ steps.probe.outputs.down }}" == "true" ]]; then
-            DETAIL=$'\n'"${{ steps.probe.outputs.detail }}"
+            TITLE="REAL OUTAGE: OfferPlay API is DOWN"
+            PRIORITY=5; TAGS="rotating_light,sos"
+            MSG="THIS IS REAL - not a test."$'\n'"Time: ${IST_NOW}"$'\n'"The API is failing for users:"$'\n'"${{ steps.probe.outputs.detail }}"$'\n\n'"${FIX}"
           else
-            DETAIL=$'\n'"- this is a test alert; the API is fine"
+            TITLE="TEST ONLY - OfferPlay alert test (API is fine)"
+            PRIORITY=4; TAGS="test_tube"
+            MSG="This is only a TEST of the emergency alert. Nothing is wrong - the API is working normally."$'\n'"Time: ${IST_NOW}"$'\n'"A real outage alert will start with the words REAL OUTAGE."
           fi
-          TITLE="${TEST}OfferPlay API is DOWN - EMERGENCY"
-          MSG="$(date -u '+%d %b %H:%M UTC') - the API is failing for external clients:${DETAIL}"
-          MSG="${MSG}"$'\n\n'"What to do: Cloudways -> Server -> Security -> Firewall -> (gear) -> turn anti-bot / Splash Screen OFF, or ask Cloudways support to whitelist api.offerplay.in in WebShield. Then confirm https://api.offerplay.in/api/app/feature-flags returns JSON."
           if [[ -n "$NTFY_TOPIC" ]]; then
             curl -sS -o /dev/null -w "ntfy push: HTTP %{http_code}\n" \
-              -H "Title: $TITLE" -H "Priority: 5" -H "Tags: rotating_light,sos" \
+              -H "Title: $TITLE" -H "Priority: $PRIORITY" -H "Tags: $TAGS" \
               -H "Click: https://admin.offerplay.in" \
               --data-binary "$MSG" "https://ntfy.sh/$NTFY_TOPIC"
           else
@@ -107,17 +117,18 @@ jobs:
           fi
 
       - name: Recovery notice
-        if: steps.probe.outputs.down == 'false' && steps.prev.outputs.conclusion == 'failure' && github.event.inputs.test_alert != 'true'
+        if: steps.probe.outputs.down == 'false' && steps.prev.outputs.was_down == 'true' && github.event.inputs.test_alert != 'true'
         shell: bash
         run: |
-          MSG="$(date -u '+%d %b %H:%M UTC') - API is serving JSON again for external clients. All three probes pass."
+          IST_NOW="$(TZ=Asia/Kolkata date '+%d %b %Y, %I:%M %p IST')"
+          MSG="Good news - the API is serving JSON again for users. All three checks pass."$'\n'"Time: ${IST_NOW}"
           [[ -n "$NTFY_TOPIC" ]] && curl -sS -o /dev/null -w "ntfy push: HTTP %{http_code}\n" \
-              -H "Title: OfferPlay API recovered" -H "Priority: 3" -H "Tags: white_check_mark" \
+              -H "Title: RESOLVED: OfferPlay API is back" -H "Priority: 3" -H "Tags: white_check_mark" \
               --data-binary "$MSG" "https://ntfy.sh/$NTFY_TOPIC"
           if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_IDS" ]]; then
             for id in ${TELEGRAM_CHAT_IDS//,/ }; do
               curl -sS -o /dev/null "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-                --data-urlencode "chat_id=$id" --data-urlencode "text=OfferPlay API recovered - $MSG"
+                --data-urlencode "chat_id=$id" --data-urlencode "text=RESOLVED: OfferPlay API is back"$'\n'"${MSG}"
             done
           fi
 
