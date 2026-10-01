@@ -1,0 +1,130 @@
+name: OfferPlay API watch
+
+# Probes the production API every 5 minutes the way the mobile app does — and
+# demands real JSON. A plain "is it up?" check passed straight through the
+# 2026-10-01 outage, because the server answered HTTP 200 with an HTML
+# bot-challenge page ("One moment, please…"). This catches exactly that.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: 'Send a TEST emergency alert to the founders (no real outage)'
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: api-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      API: https://api.offerplay.in
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+    steps:
+      - name: Probe the API like a real app client
+        id: probe
+        shell: bash
+        run: |
+          set +e
+          : > failures.txt
+          probe() {  # url  expected-substring  label
+            local url="$1" expect="$2" label="$3" ok=0 reason=""
+            for attempt in 1 2 3; do
+              hdr=$(mktemp); body=$(mktemp)
+              code=$(curl -sS -o "$body" -D "$hdr" -w '%{http_code}' --max-time 25 \
+                     -A "OfferPlay-Watch/1.0 (github-actions)" "$url")
+              ctype=$(grep -i '^content-type:' "$hdr" | tr -d '\r' | awk '{print tolower($2)}')
+              if [[ "$ctype" == application/json* ]] && grep -q "$expect" "$body"; then ok=1; break; fi
+              if grep -qi 'One moment, please' "$body" || [[ "$ctype" == text/html* ]]; then
+                reason="HTML bot-challenge page instead of JSON (Cloudways anti-bot / WebShield is challenging API traffic)"
+              elif [[ "$code" == "000" ]]; then
+                reason="unreachable (connection failed or timed out)"
+              else
+                reason="HTTP $code, content-type '${ctype:-none}', expected '$expect'"
+              fi
+              [[ $attempt -lt 3 ]] && sleep 20
+            done
+            if [[ $ok == 1 ]]; then echo "OK    $label"; else echo "FAIL  $label -> $reason"; echo "- $label: $reason" >> failures.txt; fi
+          }
+          probe "$API/health"                  '"status":"ok"'   "node-health"
+          probe "$API/api/app/feature-flags"   '"success":true'  "api-feature-flags"
+          probe "$API/api/redeem/packages"     '"success":false' "api-redeem-packages (401 JSON expected)"
+          if [[ -s failures.txt ]]; then
+            echo "down=true" >> "$GITHUB_OUTPUT"
+            { echo 'detail<<EOF'; cat failures.txt; echo 'EOF'; } >> "$GITHUB_OUTPUT"
+          else
+            echo "down=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Look up previous run (for recovery notice)
+        id: prev
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow api-watch.yml --status completed --limit 1 --json conclusion -q '.[0].conclusion' 2>/dev/null || echo unknown)
+          echo "conclusion=${prev:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Alert founders (ntfy + Telegram)
+        if: steps.probe.outputs.down == 'true' || github.event.inputs.test_alert == 'true'
+        shell: bash
+        run: |
+          TEST=""; [[ "${{ github.event.inputs.test_alert }}" == "true" ]] && TEST="[TEST] "
+          if [[ "${{ steps.probe.outputs.down }}" == "true" ]]; then
+            DETAIL=$'\n'"${{ steps.probe.outputs.detail }}"
+          else
+            DETAIL=$'\n'"- this is a test alert; the API is fine"
+          fi
+          TITLE="${TEST}OfferPlay API is DOWN - EMERGENCY"
+          MSG="$(date -u '+%d %b %H:%M UTC') - the API is failing for external clients:${DETAIL}
+
+What to do: Cloudways -> Server -> Security -> Firewall -> (gear) -> turn anti-bot / Splash Screen OFF, or ask Cloudways support to whitelist api.offerplay.in in WebShield. Then confirm https://api.offerplay.in/api/app/feature-flags returns JSON."
+          if [[ -n "$NTFY_TOPIC" ]]; then
+            curl -sS -o /dev/null -w "ntfy push: HTTP %{http_code}\n" \
+              -H "Title: $TITLE" -H "Priority: 5" -H "Tags: rotating_light,sos" \
+              -H "Click: https://admin.offerplay.in" \
+              --data-binary "$MSG" "https://ntfy.sh/$NTFY_TOPIC"
+          else
+            echo "::warning::NTFY_TOPIC secret is not set - no push sent"
+          fi
+          if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_IDS" ]]; then
+            for id in ${TELEGRAM_CHAT_IDS//,/ }; do
+              curl -sS -o /dev/null -w "telegram($id): HTTP %{http_code}\n" \
+                "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+                --data-urlencode "chat_id=$id" --data-urlencode "text=$TITLE
+$MSG"
+            done
+          fi
+
+      - name: Recovery notice
+        if: steps.probe.outputs.down == 'false' && steps.prev.outputs.conclusion == 'failure' && github.event.inputs.test_alert != 'true'
+        shell: bash
+        run: |
+          MSG="$(date -u '+%d %b %H:%M UTC') - API is serving JSON again for external clients. All three probes pass."
+          [[ -n "$NTFY_TOPIC" ]] && curl -sS -o /dev/null -w "ntfy push: HTTP %{http_code}\n" \
+              -H "Title: OfferPlay API recovered" -H "Priority: 3" -H "Tags: white_check_mark" \
+              --data-binary "$MSG" "https://ntfy.sh/$NTFY_TOPIC"
+          if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_IDS" ]]; then
+            for id in ${TELEGRAM_CHAT_IDS//,/ }; do
+              curl -sS -o /dev/null "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+                --data-urlencode "chat_id=$id" --data-urlencode "text=OfferPlay API recovered - $MSG"
+            done
+          fi
+
+      - name: Mark the run red while the API is down
+        if: steps.probe.outputs.down == 'true'
+        run: |
+          echo "::error::API is down - see probe output above"
+          exit 1
