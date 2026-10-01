@@ -59,6 +59,7 @@ jobs:
             if [[ $ok == 1 ]]; then echo "OK    $label"; else echo "FAIL  $label -> $reason"; echo "- $label: $reason" >> failures.txt; fi
           }
           probe "$API/health"                  '"status":"ok"'   "node-health"
+          probe "$API/health/ready"            '"db":"up"'       "database (health/ready)"
           probe "$API/api/app/feature-flags"   '"success":true'  "api-feature-flags"
           probe "$API/api/redeem/packages"     '"success":false' "api-redeem-packages (401 JSON expected)"
           if [[ -s failures.txt ]]; then
