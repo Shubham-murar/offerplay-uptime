@@ -91,7 +91,16 @@ jobs:
         shell: bash
         run: |
           IST_NOW="$(TZ=Asia/Kolkata date '+%d %b %Y, %I:%M %p IST')"
-          FIX="What to do: Cloudways -> Server -> Security -> Firewall -> (gear) -> turn anti-bot / Splash Screen OFF, or ask Cloudways support to whitelist api.offerplay.in in WebShield. Then confirm https://api.offerplay.in/api/app/feature-flags returns JSON."
+          # The advice must match the failure. On 2026-10-02 a DATABASE outage went out with the
+          # anti-bot instructions, which would have sent the founders to the wrong dashboard.
+          DETAIL="${{ steps.probe.outputs.detail }}"
+          if grep -qi 'bot-challenge' <<<"$DETAIL"; then
+            FIX="What to do: Cloudways -> Server -> Security -> Firewall -> (gear) -> turn anti-bot / Splash Screen OFF, or ask Cloudways support to whitelist api.offerplay.in in WebShield. Then confirm https://api.offerplay.in/api/app/feature-flags returns JSON."
+          elif grep -qi 'node-health' <<<"$DETAIL"; then
+            FIX="What to do: the SERVER itself is not answering. Cloudways -> Server -> check it is running, then restart the backend (pm2 restart offerplay-backend). Then confirm https://api.offerplay.in/health returns JSON."
+          else
+            FIX="What to do: this is the DATABASE, not the firewall - do NOT change Cloudways anti-bot settings. Supabase dashboard -> OfferPlay project -> look for a warning banner, then Reports -> Database (CPU, memory, Disk IO). If it is maxed out, upgrade the compute size (Project Settings -> Compute and Disk). Then confirm https://api.offerplay.in/health/ready shows db up."
+          fi
           if [[ "${{ steps.probe.outputs.down }}" == "true" ]]; then
             TITLE="REAL OUTAGE: OfferPlay API is DOWN"
             PRIORITY=5; TAGS="rotating_light,sos"
@@ -122,7 +131,7 @@ jobs:
         shell: bash
         run: |
           IST_NOW="$(TZ=Asia/Kolkata date '+%d %b %Y, %I:%M %p IST')"
-          MSG="Good news - the API is serving JSON again for users. All three checks pass."$'\n'"Time: ${IST_NOW}"
+          MSG="Good news - the API is serving JSON again for users. All checks pass, including the database."$'\n'"Time: ${IST_NOW}"
           [[ -n "$NTFY_TOPIC" ]] && curl -sS -o /dev/null -w "ntfy push: HTTP %{http_code}\n" \
               -H "Title: RESOLVED: OfferPlay API is back" -H "Priority: 3" -H "Tags: white_check_mark" \
               --data-binary "$MSG" "https://ntfy.sh/$NTFY_TOPIC"
