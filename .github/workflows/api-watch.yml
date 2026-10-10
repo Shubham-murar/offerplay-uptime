@@ -7,7 +7,10 @@ name: OfferPlay API watch
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    # Offset minutes, not */5: GitHub drops on-the-dot schedules first when the
+    # shared runner pool is busy — this repo was getting one run every ~4 HOURS
+    # (measured 10-11 Oct 2026) despite asking for every 5 minutes.
+    - cron: '3,13,23,33,43,53 * * * *'
   workflow_dispatch:
     inputs:
       test_alert:
